@@ -212,7 +212,7 @@ export function initAmbienceSettings() {
                     <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
                         <span style="color: white; font-size: 14px;">滚动速度</span>
                         <div style="display: flex; align-items: center; gap: 8px; flex: 1; margin-left: 20px;">
-                            <input type="range" id="siren-ambience-karaoke-speed" class="siren-ext-progress-bar" min="0.5" max="2.0" step="0.1" style="flex: 1;">
+                            <input type="range" id="siren-ambience-karaoke-speed" class="siren-ext-progress-bar" min="0.5" max="5.0" step="0.1" style="flex: 1;">
                             <span id="siren-ambience-karaoke-speed-val" style="color: white; font-size: 14px; width: 35px; text-align: right;"></span>
                         </div>
                     </div>

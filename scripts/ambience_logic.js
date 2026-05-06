@@ -1248,7 +1248,7 @@ async function startScenePlayback(floorId, timeline, btnNode) {
       const settings =
         SillyTavern.getContext()?.extensionSettings?.siren_voice_settings;
       const speed = settings?.ambience?.karaoke_speed || 1.0;
-      const waitTime = Math.max(1000, (node.text.length * 150) / speed);
+      const waitTime = Math.max(300, (node.text.length * 150) / speed);
 
       // 👇 修改这里：只传 node
       await startKaraokeAnimation(node, waitTime, null, floorId);
