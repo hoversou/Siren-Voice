@@ -147,22 +147,24 @@ export function getMinimaxHtml() {
             </div>
 
             <div>
+                <div style="color: #f59e0b; font-size: 0.85em; margin-bottom: 5px; font-weight: bold;">
+                    <i class="fa-solid fa-lightbulb"></i> 提示：如果报错，请确认上传的音频文件长度符合要求，注意Voice ID格式，以及不要太短！
+                </div>
                 <div style="color: #ef4444; font-size: 0.8em; margin-bottom: 10px;">
-                    <i class="fa-solid fa-triangle-exclamation"></i> 注意：克隆并试听满意后，请必须正式请求（发音测试/实际使用）至少一次此音色，否则将会在 7 天内自动删除！
+                    <i class="fa-solid fa-triangle-exclamation"></i> 注意：克隆并试听满意后，请必须正式请求（发音测试/实际使用）至少一次复刻的音色，否则将会在 7 天内自动删除！
                 </div>
                 
-                <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <button id="siren-mm-btn-doclone" class="siren-ext-btn siren-ext-btn-primary" style="background: #a855f7; border: 1px solid #9333ea; color: #ffffff; box-shadow: 0 4px 12px rgba(168, 85, 247, 0.3); font-weight: bold;">
+                <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                    <button id="siren-mm-btn-doclone" class="siren-ext-btn siren-ext-btn-primary" style="background: #a855f7; border: 1px solid #9333ea; color: #ffffff; box-shadow: 0 4px 12px rgba(168, 85, 247, 0.3); font-weight: bold; flex-shrink: 0; margin-top: 2px;">
                         <i class="fa-solid fa-wand-magic-sparkles"></i> 立即克隆
                     </button>
                     
-                    <div id="siren-mm-clone-status-box" style="flex: 1; margin-left: 15px; display: flex; align-items: center; gap: 10px;">
+                    <div id="siren-mm-clone-status-box" style="flex: 1; margin-left: 15px; display: flex; align-items: center; gap: 10px; min-width: 0;">
                         <audio id="siren-mm-clone-audio" controls style="height: 32px; flex: 1; display: none;"></audio>
-                        <span id="siren-mm-clone-status" style="color: #64748b; font-size: 0.85em; white-space: nowrap;"></span>
+                        <span id="siren-mm-clone-status" style="color: #64748b; font-size: 0.85em; white-space: normal; word-break: break-word; line-height: 1.4;"></span>
                     </div>
                 </div>
             </div>
-        </div>
 
         <h4 style="color: #10b981; margin-bottom: 10px; font-size: 1.1em; margin-top: 25px;"><i class="fa-solid fa-vial" style="margin-right: 5px;"></i> MiniMax 发音测试</h4>
         <div style="background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 6px; padding: 10px;">
@@ -630,9 +632,9 @@ export function bindMinimaxEvents() {
         // 自动播放
         $audio[0].play().catch((e) => console.warn("自动播放被浏览器拦截", e));
       } catch (err) {
-        console.error("[Siren Voice] 测试生成失败:", err);
+        console.error("[Siren Voice] 克隆失败:", err);
         $status.html(
-          `<span style="color: #ef4444;" title="${err.message}">失败: ${err.message.substring(0, 15)}...</span>`,
+          `<span style="color: #ef4444;" title="${err.message}">失败: ${err.message}</span>`,
         );
       } finally {
         $btn.prop("disabled", false);
