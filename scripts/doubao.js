@@ -225,19 +225,33 @@ export function bindDoubaoEvents() {
 
       // 收集角色列表数据
       const voiceMap = {};
-      $("#siren-db-char-list .siren-db-char-row").each(function () {
-        const charName = $(this).find(".siren-db-char-name").val().trim();
-        const speakerVal =
-          $(this).find(".siren-db-speaker-input").val()?.trim() || "";
-        const modelVal = $(this).find(".siren-db-model-select").val();
+      $("#siren-db-char-list .siren-db-char-row:not(.siren-db-deleted)").each(
+        function () {
+          const charName = $(this).find(".siren-db-char-name").val().trim();
+          const speakerVal =
+            $(this).find(".siren-db-speaker-input").val()?.trim() || "";
+          const modelVal = $(this).find(".siren-db-model-select").val();
 
-        if (charName && speakerVal) {
-          voiceMap[charName] = {
-            speaker: speakerVal,
-            model: modelVal,
-          };
+          if (charName && speakerVal) {
+            voiceMap[charName] = {
+              speaker: speakerVal,
+              model: modelVal,
+            };
+          }
+        },
+      );
+
+      const context = SillyTavern.getContext();
+      const charExt =
+        context.characters?.[context.characterId]?.data?.extensions
+          ?.siren_voice_tts_doubao || {};
+      const oldVoices = charExt.voices || {};
+
+      for (const oldChar of Object.keys(oldVoices)) {
+        if (voiceMap[oldChar] === undefined) {
+          voiceMap[oldChar] = null; // 提交 null 破坏旧的深拷贝缓存
         }
-      });
+      }
 
       const success = await saveToCharacterCard(
         "siren_voice_tts_doubao",
@@ -378,17 +392,27 @@ function loadCharacterDoubaoSettings() {
       ?.siren_voice_tts_doubao || {};
   const voices = charExt.voices || {};
 
-  if (Object.keys(voices).length === 0) {
-    // 列表为空时，新增一行空记录（要求不自动填入名字）
-    addCharRow("", "seed-tts-2.0", "zh_female_vv_uranus_bigtts");
-  } else {
+  let hasValidVoice = false;
+  const validVoiceMap = {}; // 用来存放过滤后真正干净的音色
+
+  if (Object.keys(voices).length > 0) {
     for (const [charName, config] of Object.entries(voices)) {
+      // ✨ 核心修复 3：跳过那些被我们标记为 null 的已被删音色
+      if (!config) continue;
+
+      hasValidVoice = true;
+      validVoiceMap[charName] = config;
       addCharRow(charName, config.model, config.speaker);
     }
   }
 
-  // 初始化时也刷新一下发音测试的下拉框
-  refreshTestCharacterSelect(voices);
+  if (!hasValidVoice) {
+    // 列表真正为空时，新增一行空记录
+    addCharRow("", "seed-tts-2.0", "zh_female_vv_uranus_bigtts");
+  }
+
+  // 初始化时也刷新一下发音测试的下拉框 (注意这里要传过滤后的 validVoiceMap)
+  refreshTestCharacterSelect(validVoiceMap);
 }
 
 // 🌟 辅助函数：刷新测试区域的角色下拉框
@@ -562,6 +586,8 @@ function addCharRow(name, model, speaker) {
   });
 
   $row.find(".siren-db-btn-del").on("click", function () {
+    // ✨ 核心修复 4：立刻打上 .siren-db-deleted 标记
+    $row.addClass("siren-db-deleted");
     $row.slideUp(150, () => $row.remove());
   });
 

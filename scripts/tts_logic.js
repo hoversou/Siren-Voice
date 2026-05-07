@@ -377,7 +377,9 @@ export async function preloadTtsForTimeline(
   try {
     switch (provider) {
       case "indextts":
-        // 串行生成
+      case "doubao":
+      case "gptsovits": // 👈 🌟 核心修复：把 gptsovits 移到这里，强制排队！
+        // 串行生成 (按时间轴顺序，一句话生成完，再请求下一句)
         for (let i = 0; i < timeline.length; i++) {
           const node = timeline[i];
           if (node.type === "tts") {
@@ -393,8 +395,6 @@ export async function preloadTtsForTimeline(
         break;
 
       case "minimax":
-      case "gptsovits":
-        // 🚀 云端 API 并发生成：修改 timeline 的原地状态，不需要关心顺序（因为播放时有专用的时序控制系统）
         const promises = timeline.map(async (node) => {
           if (node.type === "tts") {
             node.blob = await fetchTtsBlobProvider(
@@ -410,6 +410,7 @@ export async function preloadTtsForTimeline(
         break;
 
       default:
+        // 兜底逻辑保持串行
         for (let i = 0; i < timeline.length; i++) {
           const node = timeline[i];
           if (node.type === "tts") {

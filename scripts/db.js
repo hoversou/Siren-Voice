@@ -48,15 +48,24 @@ export async function addTtsRecord(record) {
     const settings = getSirenSettings();
     const maxLimit = settings?.tts?.history_length ?? 30;
 
+    // 🌟 核心修复 1：将 Blob 降维转换成 ArrayBuffer，彻底解决手机端存取错乱 Bug
+    let bufferToStore = record.audioBlob;
+    let mimeType = "audio/mpeg"; // 默认兜底
+    if (record.audioBlob instanceof Blob) {
+      bufferToStore = await record.audioBlob.arrayBuffer();
+      mimeType = record.audioBlob.type;
+    }
+
     const newRecord = {
       id: Date.now().toString() + Math.random().toString(36).substring(2, 6),
       timestamp: Date.now(),
       isFavorite: false,
-      chatId: record.chatId || "default", // 👈 [新增] 存储当前聊天窗口 ID
+      chatId: record.chatId || "default",
       ...record,
+      audioBlob: bufferToStore,
+      mimeType: mimeType,
     };
 
-    // 插入逻辑不变...
     const transaction = db.transaction(STORE_NAME, "readwrite");
     const store = transaction.objectStore(STORE_NAME);
     await new Promise((resolve, reject) => {
@@ -86,10 +95,21 @@ export async function getTtsHistory(chatId) {
       const request = store.getAll();
 
       request.onsuccess = () => {
-        // 👈 [修改] 增加过滤逻辑：只显示匹配当前 chatId 的记录
+        // 只显示匹配当前 chatId 的记录，并按时间从新到旧排序
         const results = request.result
           .filter((r) => r.chatId === chatId)
-          .sort((a, b) => b.timestamp - a.timestamp);
+          .sort((a, b) => b.timestamp - a.timestamp)
+          .map((r) => {
+            // 🌟 核心修复：在这里统一拦截！
+            // 把数据库里的 ArrayBuffer 重新组装成浏览器可以播放和下载的 Blob
+            if (r.audioBlob instanceof ArrayBuffer) {
+              r.audioBlob = new Blob([r.audioBlob], {
+                type: r.mimeType || "audio/mpeg",
+              });
+            }
+            return r;
+          });
+
         resolve(results);
       };
       request.onerror = (e) => reject(e.target.error);
@@ -220,16 +240,25 @@ export async function findExactTtsRecord(
 ) {
   try {
     const history = await getTtsHistory(chatId);
-    // getTtsHistory 已经按时间从新到旧排序 (b.timestamp - a.timestamp)
-    // 找到的第一个匹配项就是最新生成的版本
-    return history.find(
+    const match = history.find(
       (r) =>
         String(r.floor) === String(floor) &&
         r.char === char &&
         r.text === text &&
-        (r.mood || "") === mood && // 👈 新增：严格匹配情绪
-        (r.detail || "") === detail, // 👈 新增：严格匹配细节
+        (r.mood || "") === mood &&
+        (r.detail || "") === detail,
     );
+
+    if (match) {
+      // 🌟 核心修复 2：如果拿出来的是 ArrayBuffer，就在内存里当场捏成 Blob 还给调度器
+      if (match.audioBlob instanceof ArrayBuffer) {
+        match.audioBlob = new Blob([match.audioBlob], {
+          type: match.mimeType || "audio/mpeg",
+        });
+      }
+      return match;
+    }
+    return null;
   } catch (err) {
     console.error("[Siren Voice] 💾 查找精确 TTS 缓存失败:", err);
     return null;
