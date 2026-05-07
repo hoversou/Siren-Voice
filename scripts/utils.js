@@ -259,29 +259,11 @@ export async function syncTtsWorldbookEntries(selectedProvider, isTtsEnabled) {
   if (
     !window.TavernHelper ||
     typeof window.TavernHelper.updateWorldbookWith !== "function"
-  ) {
-    console.warn("[Siren Voice] TavernHelper 不可用，跳过世界书同步。");
+  )
     return;
-  }
 
-  // 1. 获取要注入的音色和情绪数组
-  const { voices, moods } = getTtsVoiceAndMoodLists(selectedProvider);
-
-  // 🌟 新增：复用 AMBIENCE 逻辑，提取基础名称以剥离变体后缀 (如 "愤怒_歇斯底里-1" -> "愤怒_歇斯底里")
-  const getBaseName = (name) => {
-    return name.replace(/-\d+$/, "").trim();
-  };
-
-  // 🌟 新增：对情绪列表进行过滤、去后缀并去重
-  const uniqueMoods = [
-    ...new Set(
-      moods.filter((name) => name && name.trim() !== "").map(getBaseName),
-    ),
-  ];
-
-  // 格式化为字符串
-  const voiceStr = voices.length > 0 ? `[${voices.join(", ")}]` : "[]";
-  const moodStr = uniqueMoods.length > 0 ? `[${uniqueMoods.join(", ")}]` : "[]";
+  const targetWbName = getActiveSirenWorldbookName();
+  if (!targetWbName) return;
 
   const providerToEntrySuffix = {
     indextts: "indexTTS",
@@ -289,62 +271,28 @@ export async function syncTtsWorldbookEntries(selectedProvider, isTtsEnabled) {
     doubao: "豆包",
     minimax: "minimax",
   };
-
   const targetEntryName = isTtsEnabled
     ? `TTS-${providerToEntrySuffix[selectedProvider]}`
     : null;
 
-  // 👇 新增这部分：获取 targetWbName 并进行防空检查
-  const targetWbName = getActiveSirenWorldbookName();
-  if (!targetWbName) {
-    console.warn(
-      "[Siren Voice] 未找到包含 'Siren-Voice' 的世界书，跳过 TTS 世界书同步。",
-    );
-    return;
-  }
-
   try {
     await window.TavernHelper.updateWorldbookWith(
-      targetWbName, // 👈 现在这里就不会报 undefined 的错了
+      targetWbName,
       (worldbook) => {
         worldbook.forEach((entry) => {
           if (entry.name && entry.name.startsWith("TTS-")) {
-            // 更新开关状态
+            // 纯粹的状态切换，不再修改 extra 和 content
             entry.enabled = isTtsEnabled
               ? entry.name === targetEntryName
               : false;
-
-            // 2. 宏替换逻辑：仅对被激活的条目进行替换
-            if (entry.enabled) {
-              if (!entry.extra) entry.extra = {};
-
-              // 首次处理时，将包含 {{VOICE_LIST}} 的原始文本备份到 extra 字段
-              if (typeof entry.extra.siren_original_content !== "string") {
-                entry.extra.siren_original_content = entry.content;
-              }
-
-              // 永远基于备份的原始模板进行替换，保证操作幂等（不丢失宏）
-              let updatedContent = entry.extra.siren_original_content;
-              updatedContent = updatedContent.replace(
-                /\{\{VOICE_LIST\}\}/g,
-                voiceStr,
-              );
-              updatedContent = updatedContent.replace(
-                /\{\{MOOD_LIST\}\}/g,
-                moodStr,
-              );
-
-              entry.content = updatedContent;
-            }
           }
         });
         return worldbook;
       },
       { render: "debounced" },
     );
-
     console.log(
-      `[Siren Voice] 世界书同步完成。激活条目: ${targetEntryName || "无"}\n注入音色: ${voiceStr}\n注入情绪: ${moodStr}`,
+      `[Siren Voice] TTS世界书条目开关同步完成。激活条目: ${targetEntryName || "无"}`,
     );
   } catch (error) {
     console.error("[Siren Voice] 同步世界书失败:", error);
@@ -397,97 +345,25 @@ export async function syncAmbienceWorldbookEntries(isAmbienceEnabled) {
   if (
     !targetWbName ||
     typeof window.TavernHelper.updateWorldbookWith !== "function"
-  ) {
-    console.warn(
-      "[Siren Voice] 未找到包含 'Siren-Voice' 的世界书或环境不可用，跳过 AMBIENCE 世界书同步。",
-    );
+  )
     return;
-  }
-
-  // 获取当前的 AMBIENCE 和 SFX 列表
-  const settings = getSirenSettings();
-  const ambienceState = settings.ambience || {};
-
-  // 🌟 核心修改 1：定义一个辅助函数，正则匹配结尾的连字符或下划线加数字 (如 -1, _2) 并剔除
-  const getBaseName = (name) => {
-    // 匹配末尾的 "-数字" 并替换为空。例如 "乡村_雨声-1" -> "乡村_雨声"
-    return name.replace(/-\d+$/, "").trim();
-  };
-
-  // 🌟 核心修改 2：提取 AMBIENCE 名称 -> 过滤空值 -> 提取基础名 -> 使用 Set 去重
-  const ambienceLib =
-    ambienceState.libraries?.[ambienceState.current_list] || [];
-  const uniqueAmbienceNames = [
-    ...new Set(
-      ambienceLib
-        .map((item) => item.name)
-        .filter((name) => name.trim() !== "")
-        .map(getBaseName),
-    ),
-  ];
-  const ambienceStr =
-    uniqueAmbienceNames.length > 0
-      ? `[${uniqueAmbienceNames.join(", ")}]`
-      : "[]";
-
-  // 🌟 核心修改 3：对 SFX 执行相同的提取和去重逻辑
-  const sfxLib =
-    ambienceState.sfx_libraries?.[ambienceState.sfx_current_list] || [];
-  const uniqueSfxNames = [
-    ...new Set(
-      sfxLib
-        .map((item) => item.name)
-        .filter((name) => name.trim() !== "")
-        .map(getBaseName),
-    ),
-  ];
-  const sfxStr =
-    uniqueSfxNames.length > 0 ? `[${uniqueSfxNames.join(", ")}]` : "[]";
 
   try {
     await window.TavernHelper.updateWorldbookWith(
       targetWbName,
       (worldbook) => {
         worldbook.forEach((entry) => {
-          // 核心逻辑：精准匹配名称为 "AMBIENCE" 或 "SFX" 的条目
+          // 纯粹的状态切换，不再修改 extra 和 content
           if (entry.name === "AMBIENCE" || entry.name === "SFX") {
             entry.enabled = isAmbienceEnabled;
-
-            // 宏替换逻辑
-            if (entry.enabled) {
-              if (!entry.extra) entry.extra = {};
-
-              // 首次处理时，将包含宏占位符的原始文本备份到 extra 字段
-              if (typeof entry.extra.siren_original_content !== "string") {
-                entry.extra.siren_original_content = entry.content;
-              }
-
-              // 永远基于备份的原始模板进行替换，保证操作幂等（不丢失宏）
-              let updatedContent = entry.extra.siren_original_content;
-
-              if (entry.name === "AMBIENCE") {
-                updatedContent = updatedContent.replace(
-                  /\{\{AMBIENCE_LIST\}\}/g,
-                  ambienceStr,
-                );
-              } else if (entry.name === "SFX") {
-                updatedContent = updatedContent.replace(
-                  /\{\{SFX_LIST\}\}/g,
-                  sfxStr,
-                );
-              }
-
-              entry.content = updatedContent;
-            }
           }
         });
         return worldbook;
       },
       { render: "debounced" },
     );
-
     console.log(
-      `[Siren Voice] AMBIENCE世界书同步完成。幻境总开关状态: ${isAmbienceEnabled}\n注入AMBIENCE: ${ambienceStr}\n注入SFX: ${sfxStr}`,
+      `[Siren Voice] AMBIENCE/SFX世界书条目开关同步完成。状态: ${isAmbienceEnabled}`,
     );
   } catch (error) {
     console.error("[Siren Voice] 同步AMBIENCE世界书失败:", error);

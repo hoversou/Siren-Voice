@@ -263,7 +263,6 @@ export function bindDoubaoEvents() {
         // 强制调用世界书同步，传入 true (isTtsEnabled) 意味着：
         // 1. 找到并开启 `TTS-豆包` 条目
         // 2. 关闭世界书中其他所有以 `TTS-` 开头的条目
-        // 3. 读取最新的角色卡音色信息并注入到 `TTS-豆包` 的 {{VOICE_LIST}} 中
         await syncTtsWorldbookEntries("doubao", true);
       }
     });

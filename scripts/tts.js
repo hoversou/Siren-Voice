@@ -10,6 +10,7 @@ import {
   toggleFavoriteTtsRecord,
 } from "./db.js";
 import { enqueueTTSBlob } from "./tts_logic.js";
+import { updateTtsListMacros } from "./macros.js";
 
 let tempTtsStyles = {};
 let currentTtsStyleName = "默认气泡";
@@ -163,7 +164,7 @@ export function initTtsSettings() {
                     <div class="siren-ext-setting-label">
                         <label style="color: #a855f7; font-size: 1.1em; font-weight: bold;"><i class="fa-solid fa-microchip" style="margin-right: 5px;"></i>当前 TTS</label>
                     </div>
-                    <select id="siren-tts-provider" class="siren-ext-select" style="max-width: 200px;">
+                    <select id="siren-tts-provider" class="siren-ext-select" style="max-width: 200px; border-color: #0ea5e9 !important; box-shadow: 0 0 10px rgba(14, 165, 233, 0.5) !important; outline: none; background-color: rgba(15, 23, 42, 0.8);">
                         <option value="indextts">Index-TTS 2</option>
                         <option value="gptsovits">GPT-SoVITS</option>
                         <option value="doubao">豆包（火山引擎）</option>
@@ -256,12 +257,30 @@ export function initTtsSettings() {
   bindTtsGlobalUiEvents();
   renderProviderSettings();
 
+  const initialProvider = $("#siren-tts-provider").val() || "doubao";
+  updateTtsGlobalMacros(initialProvider);
+
   const context = SillyTavern.getContext();
+
   context.eventSource.on("chat_id_changed", () => {
-    if ($("#siren-tts-history-modal").is(":visible")) {
-      console.log("[Siren Voice] 检测到 ChatID 变更，刷新历史面板...");
-      renderTtsHistory();
-    }
+    // 🌟 1. 移除 lastSirenChatId 的判断，只要事件触发，无条件执行！
+    // 🌟 2. 核心：必须使用 setTimeout 延迟 150ms！
+    // 因为 ST 触发 chat_id_changed 时，context.characters[charId] 可能还没把 extensions 数据解包完毕。
+    setTimeout(async () => {
+      const currentProvider = $("#siren-tts-provider").val() || "indextts";
+
+      console.log(
+        `[Siren Voice] 📢 捕获 chat_id_changed，准备重载宏 -> 渠道: [${currentProvider}]`,
+      );
+
+      // 提取参数并重新注册宏 (由于延迟了 150ms，此时一定能拿到角色卡里真实的 voices 数据)
+      await updateTtsGlobalMacros(currentProvider);
+
+      if ($("#siren-tts-history-modal").is(":visible")) {
+        console.log("[Siren Voice] 刷新历史面板...");
+        renderTtsHistory();
+      }
+    }, 150);
   });
 }
 
@@ -509,8 +528,12 @@ function bindTtsGlobalUiEvents() {
     }
   });
 
-  $("#siren-tts-provider").on("change", function () {
+  $("#siren-tts-provider").on("change", async function () {
     renderProviderSettings();
+    const newProvider = $(this).val();
+    const isEnabled = $("#siren-tts-enable").is(":checked");
+    await syncTtsWorldbookEntries(newProvider, isEnabled);
+    await updateTtsGlobalMacros(newProvider);
   });
 
   $("#siren-tts-history-btn")
@@ -574,9 +597,6 @@ function bindTtsGlobalUiEvents() {
 
         // 4. 同步世界书的 TTS 条目状态
         await syncTtsWorldbookEntries(currentProvider, isEnabled);
-
-        // 🚀 安全修复：派发全局事件代替直接调用 updateSirenRegex，避免循环依赖或未加载导致的报错
-        window.dispatchEvent(new CustomEvent("siren:settings_saved"));
 
         // 5. 核心逻辑：触发当前所选 Provider 的专属保存按钮！
         if (currentProvider === "indextts") {
@@ -672,9 +692,96 @@ function renderProviderSettings() {
   }
 }
 
-// 🌟 CSS 编译器：自动兼容 ST 的 custom- 前缀劫持
+async function updateTtsGlobalMacros(provider) {
+  const context = SillyTavern.getContext();
+  const charId = context.characterId;
 
-// 在 tts.js 文件末尾新增这个函数
+  // 获取角色卡扩展数据，如果没有选中角色则为空字典
+  const charExt =
+    charId !== undefined && charId !== null
+      ? context.characters?.[charId]?.data?.extensions || {}
+      : {};
+
+  let currentVoice = "";
+  let currentMood = "";
+
+  try {
+    // 引入全局设置（用于提取 indextts 的情绪预设）
+    const settings = getSirenSettings();
+
+    // 🚨 按照新的逻辑，直接提取 Keys 和 Names 列表
+    if (provider === "doubao") {
+      const voices = charExt.siren_voice_tts_doubao?.voices || {};
+      currentVoice = Object.keys(voices).join(", ");
+      currentMood = ""; // 不需要提取 mood
+    } else if (provider === "indextts") {
+      const voices = charExt.siren_voice_tts?.voices || {};
+      currentVoice = Object.keys(voices).join(", ");
+
+      const presets = settings?.tts?.indextts?.emotion_presets || [];
+      currentMood = presets
+        .map((p) => p.name)
+        .filter(Boolean)
+        .join(", ");
+    } else if (provider === "minimax") {
+      const voices = charExt.siren_voice_tts_minimax?.voices || {};
+      currentVoice = Object.keys(voices).join(", ");
+      currentMood = ""; // 不需要提取 mood
+    } else if (provider === "gptsovits") {
+      const charactersList = charExt.siren_voice_gptsovits?.characters || [];
+      currentVoice = charactersList
+        .map((c) => c.charName)
+        .filter(Boolean)
+        .join(", ");
+
+      const emotionsList = charExt.siren_voice_gptsovits?.emotions || [];
+      currentMood = emotionsList
+        .map((e) => e.emotion)
+        .filter(Boolean)
+        .join(", ");
+    }
+
+    console.log(
+      `[Siren Voice] 🔄 切换至 [${provider}], 提取宏参数 -> Voice: "${currentVoice}", Mood: "${currentMood}"`,
+    );
+    if (typeof updateTtsListMacros === "function") {
+      updateTtsListMacros(currentVoice, currentMood);
+    }
+
+    // 🌟 将数据写入 ST 全局宏变量
+    if (
+      window.TavernHelper &&
+      typeof window.TavernHelper.updateVariablesWith === "function"
+    ) {
+      await window.TavernHelper.updateVariablesWith(
+        (vars) => {
+          if (!vars["siren-voice"]) vars["siren-voice"] = {};
+          if (!vars["siren-voice"].tts) vars["siren-voice"].tts = {};
+
+          vars["siren-voice"].tts.provider = provider;
+          vars["siren-voice"].tts.voice = currentVoice;
+          vars["siren-voice"].tts.mood = currentMood;
+
+          return vars;
+        },
+        { type: "global" },
+      );
+
+      console.log(
+        "[Siren Voice] ✨ 全局宏更新成功 (可通过 {{global:siren-voice.tts.voice}} 和 {{global:siren-voice.tts.mood}} 提取)",
+      );
+    } else if (typeof window.executeSlashCommands === "function") {
+      // 兜底方案：防止空字符串导致斜杠命令语法错误，加入默认占位符
+      const safeVoice = currentVoice || "无";
+      const safeMood = currentMood || "无";
+      window.executeSlashCommands(`/setvar key=siren_tts_voice ${safeVoice}`);
+      window.executeSlashCommands(`/setvar key=siren_tts_mood ${safeMood}`);
+    }
+  } catch (error) {
+    console.error("[Siren Voice] ❌ 更新 TTS 全局宏时发生错误:", error);
+  }
+}
+
 export function applyTtsBeautifyCss() {
   const settings = getSirenSettings();
   const customCss = settings?.tts?.beautify_css ?? "";

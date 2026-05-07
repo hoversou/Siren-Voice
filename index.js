@@ -5,8 +5,10 @@ import { initTtsSettings, applyTtsBeautifyCss } from "./scripts/tts.js";
 import { initAmbienceSettings } from "./scripts/ambience.js";
 import { initMixerSettings } from "./scripts/mixer.js";
 import { initInterceptor } from "./scripts/interceptor.js";
+import { registerSirenMacros } from "./scripts/macros.js";
 
 (function () {
+  if (window.sirenVoiceInitialized) return;
   // 1. 定义基础外壳 - 优化了标题和 ID，保持一致性
   const shellHtml = `
       <div id="siren-ext-overlay" class="siren-ext-hidden">
@@ -30,7 +32,7 @@ import { initInterceptor } from "./scripts/interceptor.js";
               <div class="siren-ext-sidebar collapsed" id="siren-ext-sidebar">
               
                   <div class="siren-ext-nav-item active" data-tab="tab-tts">
-                      <i class="fa-solid fa-microphone-lines fa-fw" style="color: #a855f7;"></i> <span>TTS 设置</span>
+                      <i class="fa-solid fa-microphone-lines fa-fw" style="color: #a855f7;"></i> <span>塞壬之声</span>
                   </div>
                   <div class="siren-ext-nav-item" data-tab="tab-ambience">
                       <i class="fa-solid fa-wand-magic-sparkles fa-fw" style="color: #3b82f6;"></i> <span>幻境氛围</span>
@@ -55,7 +57,12 @@ import { initInterceptor } from "./scripts/interceptor.js";
 
   // 2. 注入 HTML 并初始化各模块 (ID 进行了替换 siren-)
   function initPlugin() {
-    if (document.getElementById("siren-ext-overlay")) return;
+    if (
+      window.sirenVoiceInitialized ||
+      document.getElementById("siren-ext-overlay")
+    )
+      return;
+    window.sirenVoiceInitialized = true;
     document.body.insertAdjacentHTML("beforeend", shellHtml);
 
     bindGlobalEvents();
@@ -71,6 +78,7 @@ import { initInterceptor } from "./scripts/interceptor.js";
     applyTtsBeautifyCss();
     initAmbienceSettings();
     initMixerSettings();
+    registerSirenMacros();
 
     // 【新增】初始化时绑定 ST 监听事件
     bindSTEvents();
