@@ -1,40 +1,374 @@
+import { requestIndexTtsGeneration } from "./indextts_logic.js";
+import { generateMinimaxAudioBlob } from "./minimax_logic.js";
+import { generateDoubaoProductionAudioBlob } from "./doubao_logic.js";
+import { generateGptSovitsAudio } from "./gptsovits_logic.js";
 import {
-  getSirenSettings,
-  saveToCharacterCard,
-  saveSirenSettings,
-} from "./settings.js";
-import { fetchMinimaxVoices } from "./minimax_logic.js";
-import { bindSirenSliders, syncTtsWorldbookEntries } from "./utils.js";
+  parseSpeakTags,
+  stripParentheticalAsides,
+  checkReplyIntegrity,
+  getRealVolume,
+  stripInlineMarkdown,
+  stripWrappingPunctuation,
+} from "./utils.js";
+import { addTtsRecord } from "./db.js";
+import {
+  setBusVolume,
+  routeAudioToMixer,
+  initAudioEngine,
+} from "./audio_engine.js";
 
-let currentEditingRow = null;
-let availableVoices = [];
+document.addEventListener("sirenVolumeChanged", (e) => {
+  const { channel } = e.detail;
+  const volumeValue = getRealVolume(channel);
+  setBusVolume(channel, volumeValue);
+});
 
-function getDefaultMinimaxAdvData() {
+function getMinimaxCharConfig(charName, ttsSettings) {
+  const context = SillyTavern.getContext();
+  const charId = context.characterId;
+  const charData =
+    context.characters[charId]?.data?.extensions?.siren_voice_tts_minimax
+      ?.voices || {};
+  const charConfig = charData[charName];
+
+  if (!charConfig || !charConfig.voice_id) {
+    if (window.toastr)
+      window.toastr.warning(`未配置 [${charName}] 的 MiniMax 音色映射！`);
+    return null;
+  }
+
   return {
-    speed: 1.0,
-    vol: 1.0,
-    pitch: 0,
-    modify_pitch: 0,
-    modify_intensity: 0,
-    modify_timbre: 0,
-    sound_effect: "none",
+    region: ttsSettings.region || "cn",
+    api_key: ttsSettings.api_key,
+    model: ttsSettings.model,
+    text_norm: ttsSettings.text_norm,
+    custom_url: ttsSettings.custom_url || "",
+    ...charConfig,
   };
 }
 
-export function getMinimaxHtml() {
-  return `
-    <div id="siren-minimax-wrapper">
-        <div style="background: rgba(15, 23, 42, 0.4); border: 1px solid #334155; border-radius: 6px; padding: 15px; display: flex; flex-direction: column; gap: 12px;">
-            <h4 style="color: #06b6d4; font-size: 1.1em; margin: 0;">
-                <i class="fa-solid fa-server" style="margin-right: 5px;"></i> MiniMax API 配置
-            </h4>
+function getDoubaoCharConfig(charName, ttsSettings) {
+  const context = SillyTavern.getContext();
+  const charId = context.characterId;
+  const charData =
+    context.characters[charId]?.data?.extensions?.siren_voice_tts_doubao
+      ?.voices || {};
+  const charConfig = charData[charName];
 
-            <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;">
-                <div class="siren-ext-setting-label" style="white-space: nowrap; font-size: 0.95em; color: #cbd5e1;">API 来源</div>
-                <select id="siren-mm-region" class="siren-ext-select" style="flex: 1; min-width: 200px;">
-                    <option value="cn">国内版 (api.minimaxi.com)</option>
-                    <option value="global">国际版 (api.minimax.io)</option>
-                </select>
+  if (!charConfig || !charConfig.speaker) {
+    if (window.toastr)
+      window.toastr.warning(`未配置 [${charName}] 的豆包音色映射！`);
+    return null;
+  }
+
+  return {
+    app_id: ttsSettings.appId || ttsSettings.app_id,
+    access_key: ttsSettings.accessKey || ttsSettings.access_key,
+    model: charConfig.model || ttsSettings.model,
+    voice_id: charConfig.speaker,
+  };
+}
+
+export async function dispatchTtsGeneration(
+  speakObj,
+  floorId,
+  provider,
+  ttsSettings,
+  forceRegen = false,
+) {
+  try {
+    const blob = await fetchTtsBlobProvider(
+      speakObj,
+      floorId,
+      provider,
+      ttsSettings,
+      forceRegen,
+    );
+
+    if (blob) {
+      enqueueTTSBlob(blob, speakObj);
+    }
+  } catch (error) {
+    console.error(`[Siren Voice][Router] ❌ ${provider} 分发失败:`, error);
+  }
+}
+
+let currentTtsAudio = null;
+let currentTtsObjectUrl = null;
+let audioQueue = [];
+let isPlaying = false;
+
+export async function enqueueTTSBlob(blob, speakObj = null) {
+  audioQueue.push({ blob, speakObj });
+  if (!isPlaying) {
+    playNextInQueue();
+  }
+}
+
+async function playNextInQueue() {
+  if (audioQueue.length === 0) {
+    isPlaying = false;
+    return;
+  }
+
+  isPlaying = true;
+  const item = audioQueue.shift();
+  await playSingleBlob(item.blob, item.speakObj);
+}
+
+async function playSingleBlob(blob, speakObj = null) {
+  cleanupCurrentTTS();
+
+  currentTtsObjectUrl = URL.createObjectURL(blob);
+  currentTtsAudio = new Audio(currentTtsObjectUrl);
+  currentTtsAudio.volume = 1.0;
+  currentTtsAudio.preload = "auto";
+
+  const tagType = speakObj?.tag || "speak";
+  const dir =
+    tagType === "inner" || tagType === "phone"
+      ? "center"
+      : speakObj?.dir || speakObj?.attrs?.dir || "center";
+
+  try {
+    initAudioEngine();
+    routeAudioToMixer(currentTtsAudio, "tts", dir, tagType);
+    console.log(
+      `[Siren Voice] TTS 物理路由成功: 通道=tts, 方位=${dir}, 特效=${tagType}`,
+    );
+  } catch (e) {
+    console.warn("[Siren Voice] TTS 空间/特效路由失败，尝试回退原生控制", e);
+    currentTtsAudio.volume = getRealVolume("tts") / 100;
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  currentTtsAudio.onended = () => {
+    cleanupCurrentTTS();
+    playNextInQueue();
+  };
+
+  currentTtsAudio.onerror = () => {
+    console.error("[Siren Voice][TTS] 单段音频播放失败");
+    cleanupCurrentTTS();
+    playNextInQueue();
+  };
+
+  try {
+    await currentTtsAudio.play();
+  } catch (err) {
+    console.error("[Siren Voice][TTS] 播放异常:", err);
+    cleanupCurrentTTS();
+    playNextInQueue();
+  }
+}
+
+export function stopCurrentTTS() {
+  audioQueue = [];
+  isPlaying = false;
+
+  if (currentTtsAudio) {
+    try {
+      currentTtsAudio.pause();
+      currentTtsAudio.currentTime = 0;
+    } catch {}
+  }
+  cleanupCurrentTTS();
+}
+
+function cleanupCurrentTTS() {
+  if (currentTtsAudio) {
+    currentTtsAudio.onended = null;
+    currentTtsAudio.onerror = null;
+    currentTtsAudio = null;
+  }
+
+  if (currentTtsObjectUrl) {
+    URL.revokeObjectURL(currentTtsObjectUrl);
+    currentTtsObjectUrl = null;
+  }
+}
+
+export async function fetchTtsBlobProvider(
+  speakObj,
+  floor,
+  provider,
+  ttsSettings,
+  forceRegen = false,
+) {
+  try {
+    const context = SillyTavern.getContext();
+    const currentChatId = context?.chatId;
+    const { findExactTtsRecord } = await import("./db.js");
+
+    if (!forceRegen && currentChatId) {
+      const cachedRecord = await findExactTtsRecord(
+        currentChatId,
+        floor,
+        speakObj.char,
+        speakObj.text,
+        speakObj.mood || "",
+        speakObj.detail || "",
+      );
+      if (cachedRecord && cachedRecord.audioBlob) {
+        return cachedRecord.audioBlob;
+      }
+    }
+
+    let apiPayloadText = speakObj.text;
+
+    apiPayloadText = stripInlineMarkdown(apiPayloadText);
+    apiPayloadText = stripWrappingPunctuation(apiPayloadText);
+
+    if (
+      provider === "indextts" ||
+      provider === "doubao" ||
+      provider === "gptsovits"
+    ) {
+      apiPayloadText = stripParentheticalAsides(apiPayloadText);
+    }
+
+    if (!apiPayloadText.trim()) {
+      console.log(
+        `[Siren Voice][预加载] ⚠️ 文本清洗后为空，跳过 TTS。原文本: ${speakObj.text}`,
+      );
+      return null;
+    }
+
+    let blob = null;
+    switch (provider) {
+      case "indextts":
+        blob = await requestIndexTtsGeneration(
+          { ...speakObj, text: apiPayloadText },
+          ttsSettings,
+        );
+        break;
+
+      case "minimax":
+        const preloadMmConfig = getMinimaxCharConfig(
+          speakObj.char,
+          ttsSettings,
+        );
+        if (!preloadMmConfig) return null;
+
+        const preloadMmText = apiPayloadText
+          .replace(/\[([^\]]+)\]/g, "($1)")
+          .replace(/【([^】]+)】/g, "($1)");
+
+        blob = await generateMinimaxAudioBlob(
+          preloadMmText,
+          speakObj.mood,
+          preloadMmConfig,
+        );
+        break;
+
+      case "doubao":
+        const dbConfig = getDoubaoCharConfig(speakObj.char, ttsSettings);
+        if (!dbConfig) return null;
+        blob = await generateDoubaoProductionAudioBlob(
+          { ...speakObj, text: apiPayloadText },
+          dbConfig,
+        );
+        break;
+
+      case "gptsovits":
+        blob = await generateGptSovitsAudio(
+          apiPayloadText,
+          speakObj.char,
+          speakObj.mood,
+        );
+        break;
+
+      default:
+        console.warn(`[Siren Voice][预加载] 暂不支持该引擎: ${provider}`);
+        return null;
+    }
+
+    if (blob && currentChatId) {
+      addTtsRecord({
+        provider,
+        char: speakObj.char,
+        text: speakObj.text,
+        mood: speakObj.mood || "",
+        detail: speakObj.detail || "",
+        floor,
+        chatId: currentChatId,
+        audioBlob: blob,
+      });
+      console.log(
+        `[Siren Voice][预加载] 💾 成功生成音频并写入缓存库，可供语音条复用 (Floor: ${floor})`,
+      );
+    }
+
+    return blob;
+  } catch (err) {
+    console.error(`[Siren Voice][预加载] ❌ ${provider} 请求失败:`, err);
+    return null;
+  }
+}
+
+export async function preloadTtsForTimeline(
+  timeline,
+  floorId,
+  provider,
+  ttsSettings,
+  forceRegen = false,
+) {
+  const context = SillyTavern.getContext();
+  const chatId = context?.chatId;
+  try {
+    switch (provider) {
+      case "indextts":
+      case "doubao":
+      case "gptsovits":
+        for (let i = 0; i < timeline.length; i++) {
+          const node = timeline[i];
+          if (node.type === "tts") {
+            node.blob = await fetchTtsBlobProvider(
+              node.speakObj,
+              floorId,
+              provider,
+              ttsSettings,
+              forceRegen,
+            );
+          }
+        }
+        break;
+
+      case "minimax":
+        const promises = timeline.map(async (node) => {
+          if (node.type === "tts") {
+            node.blob = await fetchTtsBlobProvider(
+              node.speakObj,
+              floorId,
+              provider,
+              ttsSettings,
+              forceRegen,
+            );
+          }
+        });
+        await Promise.all(promises);
+        break;
+
+      default:
+        for (let i = 0; i < timeline.length; i++) {
+          const node = timeline[i];
+          if (node.type === "tts") {
+            node.blob = await fetchTtsBlobProvider(
+              node.speakObj,
+              floorId,
+              provider,
+              ttsSettings,
+              forceRegen,
+            );
+          }
+        }
+        break;
+    }
+  } catch (err) {
+    console.error(`[Siren Voice][预加载] 批量处理时间轴时崩溃:`, err);
+  }
+}                </select>
             </div>
     
             <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;">
