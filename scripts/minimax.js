@@ -1,374 +1,40 @@
-import { requestIndexTtsGeneration } from "./indextts_logic.js";
-import { generateMinimaxAudioBlob } from "./minimax_logic.js";
-import { generateDoubaoProductionAudioBlob } from "./doubao_logic.js";
-import { generateGptSovitsAudio } from "./gptsovits_logic.js";
 import {
-  parseSpeakTags,
-  stripParentheticalAsides,
-  checkReplyIntegrity,
-  getRealVolume,
-  stripInlineMarkdown,
-  stripWrappingPunctuation,
-} from "./utils.js";
-import { addTtsRecord } from "./db.js";
-import {
-  setBusVolume,
-  routeAudioToMixer,
-  initAudioEngine,
-} from "./audio_engine.js";
+  getSirenSettings,
+  saveToCharacterCard,
+  saveSirenSettings,
+} from "./settings.js";
+import { fetchMinimaxVoices } from "./minimax_logic.js";
+import { bindSirenSliders, syncTtsWorldbookEntries } from "./utils.js";
 
-document.addEventListener("sirenVolumeChanged", (e) => {
-  const { channel } = e.detail;
-  const volumeValue = getRealVolume(channel);
-  setBusVolume(channel, volumeValue);
-});
+let currentEditingRow = null;
+let availableVoices = [];
 
-function getMinimaxCharConfig(charName, ttsSettings) {
-  const context = SillyTavern.getContext();
-  const charId = context.characterId;
-  const charData =
-    context.characters[charId]?.data?.extensions?.siren_voice_tts_minimax
-      ?.voices || {};
-  const charConfig = charData[charName];
-
-  if (!charConfig || !charConfig.voice_id) {
-    if (window.toastr)
-      window.toastr.warning(`未配置 [${charName}] 的 MiniMax 音色映射！`);
-    return null;
-  }
-
+function getDefaultMinimaxAdvData() {
   return {
-    region: ttsSettings.region || "cn",
-    api_key: ttsSettings.api_key,
-    model: ttsSettings.model,
-    text_norm: ttsSettings.text_norm,
-    custom_url: ttsSettings.custom_url || "",
-    ...charConfig,
+    speed: 1.0,
+    vol: 1.0,
+    pitch: 0,
+    modify_pitch: 0,
+    modify_intensity: 0,
+    modify_timbre: 0,
+    sound_effect: "none",
   };
 }
 
-function getDoubaoCharConfig(charName, ttsSettings) {
-  const context = SillyTavern.getContext();
-  const charId = context.characterId;
-  const charData =
-    context.characters[charId]?.data?.extensions?.siren_voice_tts_doubao
-      ?.voices || {};
-  const charConfig = charData[charName];
+export function getMinimaxHtml() {
+  return `
+    <div id="siren-minimax-wrapper">
+        <div style="background: rgba(15, 23, 42, 0.4); border: 1px solid #334155; border-radius: 6px; padding: 15px; display: flex; flex-direction: column; gap: 12px;">
+            <h4 style="color: #06b6d4; font-size: 1.1em; margin: 0;">
+                <i class="fa-solid fa-server" style="margin-right: 5px;"></i> MiniMax API 配置
+            </h4>
 
-  if (!charConfig || !charConfig.speaker) {
-    if (window.toastr)
-      window.toastr.warning(`未配置 [${charName}] 的豆包音色映射！`);
-    return null;
-  }
-
-  return {
-    app_id: ttsSettings.appId || ttsSettings.app_id,
-    access_key: ttsSettings.accessKey || ttsSettings.access_key,
-    model: charConfig.model || ttsSettings.model,
-    voice_id: charConfig.speaker,
-  };
-}
-
-export async function dispatchTtsGeneration(
-  speakObj,
-  floorId,
-  provider,
-  ttsSettings,
-  forceRegen = false,
-) {
-  try {
-    const blob = await fetchTtsBlobProvider(
-      speakObj,
-      floorId,
-      provider,
-      ttsSettings,
-      forceRegen,
-    );
-
-    if (blob) {
-      enqueueTTSBlob(blob, speakObj);
-    }
-  } catch (error) {
-    console.error(`[Siren Voice][Router] ❌ ${provider} 分发失败:`, error);
-  }
-}
-
-let currentTtsAudio = null;
-let currentTtsObjectUrl = null;
-let audioQueue = [];
-let isPlaying = false;
-
-export async function enqueueTTSBlob(blob, speakObj = null) {
-  audioQueue.push({ blob, speakObj });
-  if (!isPlaying) {
-    playNextInQueue();
-  }
-}
-
-async function playNextInQueue() {
-  if (audioQueue.length === 0) {
-    isPlaying = false;
-    return;
-  }
-
-  isPlaying = true;
-  const item = audioQueue.shift();
-  await playSingleBlob(item.blob, item.speakObj);
-}
-
-async function playSingleBlob(blob, speakObj = null) {
-  cleanupCurrentTTS();
-
-  currentTtsObjectUrl = URL.createObjectURL(blob);
-  currentTtsAudio = new Audio(currentTtsObjectUrl);
-  currentTtsAudio.volume = 1.0;
-  currentTtsAudio.preload = "auto";
-
-  const tagType = speakObj?.tag || "speak";
-  const dir =
-    tagType === "inner" || tagType === "phone"
-      ? "center"
-      : speakObj?.dir || speakObj?.attrs?.dir || "center";
-
-  try {
-    initAudioEngine();
-    routeAudioToMixer(currentTtsAudio, "tts", dir, tagType);
-    console.log(
-      `[Siren Voice] TTS 物理路由成功: 通道=tts, 方位=${dir}, 特效=${tagType}`,
-    );
-  } catch (e) {
-    console.warn("[Siren Voice] TTS 空间/特效路由失败，尝试回退原生控制", e);
-    currentTtsAudio.volume = getRealVolume("tts") / 100;
-  }
-
-  await new Promise((resolve) => setTimeout(resolve, 100));
-
-  currentTtsAudio.onended = () => {
-    cleanupCurrentTTS();
-    playNextInQueue();
-  };
-
-  currentTtsAudio.onerror = () => {
-    console.error("[Siren Voice][TTS] 单段音频播放失败");
-    cleanupCurrentTTS();
-    playNextInQueue();
-  };
-
-  try {
-    await currentTtsAudio.play();
-  } catch (err) {
-    console.error("[Siren Voice][TTS] 播放异常:", err);
-    cleanupCurrentTTS();
-    playNextInQueue();
-  }
-}
-
-export function stopCurrentTTS() {
-  audioQueue = [];
-  isPlaying = false;
-
-  if (currentTtsAudio) {
-    try {
-      currentTtsAudio.pause();
-      currentTtsAudio.currentTime = 0;
-    } catch {}
-  }
-  cleanupCurrentTTS();
-}
-
-function cleanupCurrentTTS() {
-  if (currentTtsAudio) {
-    currentTtsAudio.onended = null;
-    currentTtsAudio.onerror = null;
-    currentTtsAudio = null;
-  }
-
-  if (currentTtsObjectUrl) {
-    URL.revokeObjectURL(currentTtsObjectUrl);
-    currentTtsObjectUrl = null;
-  }
-}
-
-export async function fetchTtsBlobProvider(
-  speakObj,
-  floor,
-  provider,
-  ttsSettings,
-  forceRegen = false,
-) {
-  try {
-    const context = SillyTavern.getContext();
-    const currentChatId = context?.chatId;
-    const { findExactTtsRecord } = await import("./db.js");
-
-    if (!forceRegen && currentChatId) {
-      const cachedRecord = await findExactTtsRecord(
-        currentChatId,
-        floor,
-        speakObj.char,
-        speakObj.text,
-        speakObj.mood || "",
-        speakObj.detail || "",
-      );
-      if (cachedRecord && cachedRecord.audioBlob) {
-        return cachedRecord.audioBlob;
-      }
-    }
-
-    let apiPayloadText = speakObj.text;
-
-    apiPayloadText = stripInlineMarkdown(apiPayloadText);
-    apiPayloadText = stripWrappingPunctuation(apiPayloadText);
-
-    if (
-      provider === "indextts" ||
-      provider === "doubao" ||
-      provider === "gptsovits"
-    ) {
-      apiPayloadText = stripParentheticalAsides(apiPayloadText);
-    }
-
-    if (!apiPayloadText.trim()) {
-      console.log(
-        `[Siren Voice][预加载] ⚠️ 文本清洗后为空，跳过 TTS。原文本: ${speakObj.text}`,
-      );
-      return null;
-    }
-
-    let blob = null;
-    switch (provider) {
-      case "indextts":
-        blob = await requestIndexTtsGeneration(
-          { ...speakObj, text: apiPayloadText },
-          ttsSettings,
-        );
-        break;
-
-      case "minimax":
-        const preloadMmConfig = getMinimaxCharConfig(
-          speakObj.char,
-          ttsSettings,
-        );
-        if (!preloadMmConfig) return null;
-
-        const preloadMmText = apiPayloadText
-          .replace(/\[([^\]]+)\]/g, "($1)")
-          .replace(/【([^】]+)】/g, "($1)");
-
-        blob = await generateMinimaxAudioBlob(
-          preloadMmText,
-          speakObj.mood,
-          preloadMmConfig,
-        );
-        break;
-
-      case "doubao":
-        const dbConfig = getDoubaoCharConfig(speakObj.char, ttsSettings);
-        if (!dbConfig) return null;
-        blob = await generateDoubaoProductionAudioBlob(
-          { ...speakObj, text: apiPayloadText },
-          dbConfig,
-        );
-        break;
-
-      case "gptsovits":
-        blob = await generateGptSovitsAudio(
-          apiPayloadText,
-          speakObj.char,
-          speakObj.mood,
-        );
-        break;
-
-      default:
-        console.warn(`[Siren Voice][预加载] 暂不支持该引擎: ${provider}`);
-        return null;
-    }
-
-    if (blob && currentChatId) {
-      addTtsRecord({
-        provider,
-        char: speakObj.char,
-        text: speakObj.text,
-        mood: speakObj.mood || "",
-        detail: speakObj.detail || "",
-        floor,
-        chatId: currentChatId,
-        audioBlob: blob,
-      });
-      console.log(
-        `[Siren Voice][预加载] 💾 成功生成音频并写入缓存库，可供语音条复用 (Floor: ${floor})`,
-      );
-    }
-
-    return blob;
-  } catch (err) {
-    console.error(`[Siren Voice][预加载] ❌ ${provider} 请求失败:`, err);
-    return null;
-  }
-}
-
-export async function preloadTtsForTimeline(
-  timeline,
-  floorId,
-  provider,
-  ttsSettings,
-  forceRegen = false,
-) {
-  const context = SillyTavern.getContext();
-  const chatId = context?.chatId;
-  try {
-    switch (provider) {
-      case "indextts":
-      case "doubao":
-      case "gptsovits":
-        for (let i = 0; i < timeline.length; i++) {
-          const node = timeline[i];
-          if (node.type === "tts") {
-            node.blob = await fetchTtsBlobProvider(
-              node.speakObj,
-              floorId,
-              provider,
-              ttsSettings,
-              forceRegen,
-            );
-          }
-        }
-        break;
-
-      case "minimax":
-        const promises = timeline.map(async (node) => {
-          if (node.type === "tts") {
-            node.blob = await fetchTtsBlobProvider(
-              node.speakObj,
-              floorId,
-              provider,
-              ttsSettings,
-              forceRegen,
-            );
-          }
-        });
-        await Promise.all(promises);
-        break;
-
-      default:
-        for (let i = 0; i < timeline.length; i++) {
-          const node = timeline[i];
-          if (node.type === "tts") {
-            node.blob = await fetchTtsBlobProvider(
-              node.speakObj,
-              floorId,
-              provider,
-              ttsSettings,
-              forceRegen,
-            );
-          }
-        }
-        break;
-    }
-  } catch (err) {
-    console.error(`[Siren Voice][预加载] 批量处理时间轴时崩溃:`, err);
-  }
-}                </select>
+            <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;">
+                <div class="siren-ext-setting-label" style="white-space: nowrap; font-size: 0.95em; color: #cbd5e1;">API 来源</div>
+                <select id="siren-mm-region" class="siren-ext-select" style="flex: 1; min-width: 200px;">
+                    <option value="cn">国内版 (api.minimaxi.com)</option>
+                    <option value="global">国际版 (api.minimax.io)</option>
+                </select>
             </div>
     
             <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;">
@@ -376,18 +42,27 @@ export async function preloadTtsForTimeline(
                 <input type="password" id="siren-mm-apikey" class="siren-ext-input" style="flex: 1; min-width: 200px;" placeholder="输入 MiniMax API Key">
             </div>
     
+            <!-- 👇 新增：自定义 Base URL 输入框 -->
+            <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;">
+                <div class="siren-ext-setting-label" style="white-space: nowrap; font-size: 0.95em; color: #cbd5e1;">自定义地址</div>
+                <input type="text" id="siren-mm-custom-url" class="siren-ext-input" style="flex: 1; min-width: 200px;" placeholder="留空则使用官方地址，如 https://api.example.com">
+            </div>
+    
+            <!-- 👇 修改：模型选择由固定下拉框改为可编辑输入框 + datalist 预设选项 -->
             <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;">
                 <div class="siren-ext-setting-label" style="white-space: nowrap; font-size: 0.95em; color: #cbd5e1;">合成模型</div>
-                <select id="siren-mm-model" class="siren-ext-select" style="flex: 1; min-width: 200px;">
-                    <option value="speech-2.8-hd">speech-2.8-hd</option>
-                    <option value="speech-2.8-turbo">speech-2.8-turbo</option>
-                    <option value="speech-2.6-hd">speech-2.6-hd</option>
-                    <option value="speech-2.6-turbo">speech-2.6-turbo</option>
-                    <option value="speech-02-hd">speech-02-hd</option>
-                    <option value="speech-02-turbo">speech-02-turbo</option>
-                    <option value="speech-01-hd">speech-01-hd</option>
-                    <option value="speech-01-turbo">speech-01-turbo</option>
-                </select>
+                <input type="text" id="siren-mm-model" class="siren-ext-input" list="siren-mm-model-list" 
+                       placeholder="输入或选择模型" style="flex: 1; min-width: 200px;">
+                <datalist id="siren-mm-model-list">
+                    <option value="speech-2.8-hd">
+                    <option value="speech-2.8-turbo">
+                    <option value="speech-2.6-hd">
+                    <option value="speech-2.6-turbo">
+                    <option value="speech-02-hd">
+                    <option value="speech-02-turbo">
+                    <option value="speech-01-hd">
+                    <option value="speech-01-turbo">
+                </datalist>
             </div>
     
             <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px dashed rgba(255,255,255,0.1); padding-top: 10px;">
@@ -626,7 +301,6 @@ function buildVoiceOptions(selectedId) {
     const isSelected = v.id === selectedId ? "selected" : "";
     html += `<option value="${v.id}" ${isSelected}>${v.name}</option>`;
   });
-  // 如果之前保存的 ID 不在列表里（比如 API 删除了），也要显示出来防止数据丢失
   if (selectedId && !availableVoices.find((v) => v.id === selectedId)) {
     html += `<option value="${selectedId}" selected>${selectedId} (未在列表中找到)</option>`;
   }
@@ -637,12 +311,10 @@ function updateVoiceDatalist() {
   const $datalist = $("#siren-mm-voice-datalist");
   $datalist.empty();
   availableVoices.forEach((v) => {
-    // value 是真实的 ID，展示时由于浏览器特性，会显示为 "ID (名称)"
     $datalist.append(`<option value="${v.id}">${v.name}</option>`);
   });
 }
 
-// 动态创建一行角色配置 UI
 function createMinimaxCharRow(charName = "", voiceId = "", advData = null) {
   if (!advData) advData = getDefaultMinimaxAdvData();
   const dataStr = encodeURIComponent(JSON.stringify(advData));
@@ -669,17 +341,18 @@ export function bindMinimaxEvents() {
       api_key: "",
       model: "speech-2.8-hd",
       text_norm: false,
+      custom_url: "",
     };
   }
 
-  // 1. 初始化全局参数 UI
   const mmConfig = settings.tts.minimax;
   $("#siren-mm-region").val(mmConfig.region || "cn");
   $("#siren-mm-apikey").val(mmConfig.api_key || "");
+  // 注意：这里直接设置 input 的 value，即使是普通 input 也完全兼容
   $("#siren-mm-model").val(mmConfig.model || "speech-2.8-hd");
   $("#siren-mm-norm").prop("checked", mmConfig.text_norm || false);
+  $("#siren-mm-custom-url").val(mmConfig.custom_url || "");
 
-  // 2. 从当前角色卡加载数据并渲染列表
   loadCharDataFromST();
 
   $("#siren-mm-fetch-voices")
@@ -698,12 +371,12 @@ export function bindMinimaxEvents() {
         .prop("disabled", true);
 
       try {
-        const region = $("#siren-mm-region").val(); // 获取当前来源
-        availableVoices = await fetchMinimaxVoices(apiKey, region);
+        const region = $("#siren-mm-region").val();
+        const customUrl = $("#siren-mm-custom-url").val().trim();
+        availableVoices = await fetchMinimaxVoices(apiKey, region, customUrl);
         if (window.toastr)
           window.toastr.success(`成功拉取 ${availableVoices.length} 个音色！`);
 
-        // 👇 修改：不再去遍历替换 select，而是直接更新全局的 datalist
         updateVoiceDatalist();
       } catch (e) {
         if (window.toastr) window.toastr.error("拉取音色失败：" + e.message);
@@ -712,28 +385,25 @@ export function bindMinimaxEvents() {
       }
     });
 
-  // 3. 绑定“新增角色行”按钮
   $("#siren-mm-char-add")
     .off("click")
     .on("click", function () {
       $("#siren-mm-char-list").append(createMinimaxCharRow());
-      bindRowEvents(); // 为新添加的行绑定事件
+      bindRowEvents();
     });
 
-  // 4. 监听全局输入，自动保存到 utils 的 settings (注：全局保存由主界面的磁盘按钮接管，这里只需实时更新内存对象)
-  $("#siren-mm-region, #siren-mm-apikey, #siren-mm-model, #siren-mm-norm").on(
+  $("#siren-mm-region, #siren-mm-apikey, #siren-mm-model, #siren-mm-norm, #siren-mm-custom-url").on(
     "change input",
     function () {
       const settings = getSirenSettings();
-      settings.tts.minimax.region = $("#siren-mm-region").val(); // 新增：保存来源
+      settings.tts.minimax.region = $("#siren-mm-region").val();
       settings.tts.minimax.api_key = $("#siren-mm-apikey").val().trim();
-      settings.tts.minimax.model = $("#siren-mm-model").val();
+      settings.tts.minimax.model = $("#siren-mm-model").val().trim(); // input 直接取值
       settings.tts.minimax.text_norm = $("#siren-mm-norm").is(":checked");
-      // 不在这里调用 saveSirenSettings()，交给 tts.js 里的全局保存统一处理，减少磁盘IO
+      settings.tts.minimax.custom_url = $("#siren-mm-custom-url").val().trim();
     },
   );
 
-  // 5. 绑定高级弹窗相关的滑动条数值实时显示
   const sliders = [
     { id: "#adv-mm-speed", valId: "#val-mm-speed" },
     { id: "#adv-mm-vol", valId: "#val-mm-vol" },
@@ -757,7 +427,6 @@ export function bindMinimaxEvents() {
     "adv-mm-timbre",
   ]);
 
-  // 6. 弹窗：取消按钮
   $("#siren-mm-adv-cancel")
     .off("click")
     .on("click", function () {
@@ -765,7 +434,6 @@ export function bindMinimaxEvents() {
       currentEditingRow = null;
     });
 
-  // 7. 弹窗：保存按钮 (将数据写回 DOM 的隐藏域)
   $("#siren-mm-adv-save")
     .off("click")
     .on("click", function () {
@@ -781,12 +449,10 @@ export function bindMinimaxEvents() {
         sound_effect: $("#adv-mm-sfx").val(),
       };
 
-      // 写回并用 URI 编码
       currentEditingRow
         .find(".mm-adv-data")
         .val(encodeURIComponent(JSON.stringify(newData)));
 
-      // UI 反馈
       currentEditingRow.find(".mm-btn-adv").css({
         background: "rgba(16, 185, 129, 0.2)",
         "border-color": "#10b981",
@@ -797,21 +463,18 @@ export function bindMinimaxEvents() {
       currentEditingRow = null;
     });
 
-  // 8. 角色卡保存按钮
   $("#siren-mm-save-all")
     .off("click")
     .on("click", async function (e, isSilent = false) {
-      // === 阶段一：保存全局 API 配置 ===
       const settings = getSirenSettings();
       settings.tts.minimax.region = $("#siren-mm-region").val();
       settings.tts.minimax.api_key = $("#siren-mm-apikey").val().trim();
-      settings.tts.minimax.model = $("#siren-mm-model").val();
+      settings.tts.minimax.model = $("#siren-mm-model").val().trim(); // input 取值
       settings.tts.minimax.text_norm = $("#siren-mm-norm").is(":checked");
+      settings.tts.minimax.custom_url = $("#siren-mm-custom-url").val().trim();
 
-      // 调用 utils.js 提供的全局保存功能 (传 true 表示静默保存，由下面统一发 Toast 提示)
       saveSirenSettings(true);
 
-      // === 阶段二：保存当前角色卡配置 ===
       const mapData = {};
       $("#siren-mm-char-list .siren-mm-char-item").each(function () {
         const charName = $(this).find(".mm-char-name").val().trim();
@@ -828,19 +491,16 @@ export function bindMinimaxEvents() {
         }
       });
 
-      // 写入当前角色卡扩展区 (新增传入 true 开启静默保存，抑制双重弹窗)
       const isSaved = await saveToCharacterCard(
         "siren_voice_tts_minimax",
         { voices: mapData },
         true,
       );
 
-      // 统一 UI 成功反馈
       if (!isSilent && window.toastr) {
         window.toastr.success("MiniMax: 配置已保存，已自动切换并同步世界书！");
       }
 
-      // 强制切换为 MiniMax 并同步世界书
       const currentSettings = getSirenSettings();
       currentSettings.tts.provider = "minimax";
       currentSettings.tts.enabled = true;
@@ -849,7 +509,6 @@ export function bindMinimaxEvents() {
     });
 
   window.addEventListener("siren:character_changed", () => {
-    // 只有当 MiniMax 容器存在时才执行，避免在其他 Provider 下空跑
     if ($("#siren-mm-char-list").length > 0) {
       console.log(
         "[Siren Voice] 🔄 检测到聊天切换，正在刷新 MiniMax 音色映射...",
@@ -862,7 +521,6 @@ export function bindMinimaxEvents() {
   // 🌟 发音测试面板交互逻辑
   // ==========================================
 
-  // 1. 当下拉框被点击/聚焦时，实时从上方的 DOM 列表中抓取当前已有的角色名
   $("#siren-mm-test-char")
     .off("focus")
     .on("focus", function () {
@@ -879,13 +537,11 @@ export function bindMinimaxEvents() {
         }
       });
 
-      // 如果之前选中的角色还在，保持选中状态
       if ($select.find(`option[value="${currentVal}"]`).length > 0) {
         $select.val(currentVal);
       }
     });
 
-  // 2. 点击“生成测试”按钮
   $("#siren-mm-test-generate")
     .off("click")
     .on("click", async function () {
@@ -904,15 +560,15 @@ export function bindMinimaxEvents() {
 
       const mood = $("#siren-mm-test-mood").val();
       const apiKey = $("#siren-mm-apikey").val().trim();
-      const model = $("#siren-mm-model").val();
+      const model = $("#siren-mm-model").val().trim(); // 直接取输入框的值
       const textNorm = $("#siren-mm-norm").is(":checked");
+      const customUrl = $("#siren-mm-custom-url").val().trim();
 
       if (!apiKey) {
         if (window.toastr) window.toastr.warning("缺少 API Key，请先配置！");
         return;
       }
 
-      // 去 DOM 里捞取选中角色对应的 VoiceID 和高级参数
       let voiceId = "";
       let advData = null;
       $("#siren-mm-char-list .siren-mm-char-item").each(function () {
@@ -933,13 +589,13 @@ export function bindMinimaxEvents() {
         return;
       }
 
-      // 组装最终传给请求底层的 config 对象
       const config = {
         region: $("#siren-mm-region").val(),
         api_key: apiKey,
         model: model,
         text_norm: textNorm,
         voice_id: voiceId,
+        custom_url: customUrl,
         ...(advData || getDefaultMinimaxAdvData()),
       };
 
@@ -954,7 +610,6 @@ export function bindMinimaxEvents() {
       $download.hide();
 
       try {
-        // 动态导入逻辑层，并直接利用我们写好的核心生成函数！
         const { generateMinimaxAudioBlob } = await import("./minimax_logic.js");
         const blob = await generateMinimaxAudioBlob(text, mood, config);
 
@@ -963,7 +618,6 @@ export function bindMinimaxEvents() {
         $download.attr("href", url).show();
         $status.html('<span style="color: #06b6d4;">生成成功！</span>');
 
-        // 自动播放
         $audio[0].play().catch((e) => console.warn("自动播放被浏览器拦截", e));
       } catch (err) {
         console.error("[Siren Voice] 克隆失败:", err);
@@ -974,6 +628,7 @@ export function bindMinimaxEvents() {
         $btn.prop("disabled", false);
       }
     });
+
   // ==========================================
   // 🌟 音色复刻面板交互逻辑
   // ==========================================
@@ -981,7 +636,6 @@ export function bindMinimaxEvents() {
   let cloneFileCache = null;
   let promptFileCache = null;
 
-  // 1. 触发隐藏的文件选择器并显示文件名
   $("#siren-mm-btn-choose-clone").on("click", () =>
     $("#siren-mm-clone-file").click(),
   );
@@ -996,7 +650,7 @@ export function bindMinimaxEvents() {
       $("#siren-mm-clone-filename")
         .text(file.name + ` (${(file.size / 1024 / 1024).toFixed(2)} MB)`)
         .css("color", "#0ea5e9");
-      $("#siren-mm-clone-id").val(""); // 重新选择后清空 ID
+      $("#siren-mm-clone-id").val("");
     }
   });
 
@@ -1011,7 +665,6 @@ export function bindMinimaxEvents() {
     }
   });
 
-  // 2. 抽离公用的上传逻辑
   async function handleUploadClick(fileCache, type, purpose, $btn, $idInput) {
     if (!fileCache) {
       if (window.toastr) window.toastr.warning("请先选择文件！");
@@ -1029,13 +682,15 @@ export function bindMinimaxEvents() {
       .prop("disabled", true);
 
     try {
-      const region = $("#siren-mm-region").val(); // 新增
+      const region = $("#siren-mm-region").val();
+      const customUrl = $("#siren-mm-custom-url").val().trim();
       const { uploadMinimaxFile } = await import("./minimax_logic.js");
       const fileData = await uploadMinimaxFile(
         apiKey,
         fileCache,
         purpose,
         region,
+        customUrl,
       );
       $idInput.val(fileData.file_id);
       if (window.toastr) window.toastr.success(`${type} 上传成功！`);
@@ -1067,14 +722,12 @@ export function bindMinimaxEvents() {
     );
   });
 
-  // 3. 立即克隆按钮
   $("#siren-mm-btn-doclone").on("click", async function () {
     const apiKey = $("#siren-mm-apikey").val().trim();
     const cloneId = $("#siren-mm-clone-id").val().trim();
     const voiceId = $("#siren-mm-clone-vid").val().trim();
     const demoText = $("#siren-mm-clone-text").val().trim();
 
-    // 校验必填
     if (!apiKey) return window.toastr && window.toastr.warning("缺少 API Key");
     if (!cloneId)
       return (
@@ -1091,13 +744,14 @@ export function bindMinimaxEvents() {
     const promptId = $("#siren-mm-prompt-id").val().trim();
     const promptText = $("#siren-mm-prompt-text").val().trim();
 
-    // 校验联动（如果传了示例音频 ID，就必须有文本；反之亦然）
     if ((promptId && !promptText) || (!promptId && promptText)) {
       return (
         window.toastr &&
         window.toastr.warning("示例音频 ID 和示例文本必须同时填写！")
       );
     }
+
+    const customUrl = $("#siren-mm-custom-url").val().trim();
 
     const config = {
       region: $("#siren-mm-region").val(),
@@ -1106,8 +760,9 @@ export function bindMinimaxEvents() {
       text: demoText,
       prompt_audio: promptId || null,
       prompt_text: promptText || null,
-      model: $("#siren-mm-model").val(),
+      model: $("#siren-mm-model").val().trim(), // 使用输入框的值
       need_noise_reduction: $("#siren-mm-clone-nr").is(":checked"),
+      custom_url: customUrl,
     };
 
     const $btn = $(this);
@@ -1128,13 +783,11 @@ export function bindMinimaxEvents() {
         '<span style="color: #10b981;"><i class="fa-solid fa-check"></i> 复刻成功！已可同步。</span>',
       );
 
-      // 播放试听链接
       if (resData.demo_audio) {
         $audio.attr("src", resData.demo_audio).show();
         $audio[0].play().catch((e) => console.warn("拦截", e));
       }
 
-      // 自动触发表格刷新，让用户可以直接把新出来的 VoiceID 拉取进列表
       $("#siren-mm-fetch-voices").trigger("click");
     } catch (err) {
       console.error("[Siren Voice] 克隆失败:", err);
@@ -1147,7 +800,6 @@ export function bindMinimaxEvents() {
   });
 }
 
-// 绑定行内按钮事件（每次新增行时调用）
 function bindRowEvents() {
   $(".mm-voice-id")
     .off("click")
@@ -1159,14 +811,12 @@ function bindRowEvents() {
           );
       }
     });
-  // 删除行
   $(".mm-btn-del")
     .off("click")
     .on("click", function () {
       $(this).closest(".siren-mm-char-item").remove();
     });
 
-  // 打开高级弹窗
   $(".mm-btn-adv")
     .off("click")
     .on("click", function () {
@@ -1176,7 +826,6 @@ function bindRowEvents() {
       const charName = $row.find(".mm-char-name").val().trim() || "未命名角色";
       $("#siren-mm-adv-charname").text(charName);
 
-      // 解析隐藏域数据
       const dataStr = decodeURIComponent(
         $row.find(".mm-adv-data").val() || "%7B%7D",
       );
@@ -1187,7 +836,6 @@ function bindRowEvents() {
         console.error("Parse adv data failed", e);
       }
 
-      // 回填到弹窗 UI
       $("#adv-mm-speed").val(data.speed).trigger("input");
       $("#adv-mm-vol").val(data.vol).trigger("input");
       $("#adv-mm-pitch").val(data.pitch).trigger("input");
@@ -1196,14 +844,9 @@ function bindRowEvents() {
       $("#adv-mm-timbre").val(data.modify_timbre).trigger("input");
       $("#adv-mm-sfx").val(data.sound_effect || "none");
 
-      // 展开弹窗
       $("#siren-mm-adv-modal").css("display", "flex").hide().fadeIn(150);
     });
 }
-
-// ==========================================
-// ST 角色卡读写逻辑
-// ==========================================
 
 async function loadCharDataFromST() {
   const context = SillyTavern.getContext();
@@ -1219,16 +862,13 @@ async function loadCharDataFromST() {
   }
 
   const currentAvatar = context.characters[characterId];
-  // 读取保存在角色扩展中的数据，为了防止冲突，建立独立命名空间 siren_voice_tts_minimax
   const charExt =
     currentAvatar?.data?.extensions?.siren_voice_tts_minimax?.voices || {};
 
   const keys = Object.keys(charExt);
   if (keys.length === 0) {
   } else {
-    // 渲染已有数据
     for (const [cName, config] of Object.entries(charExt)) {
-      // 将平铺的 config 拆分出 voiceId 和 advData
       const voiceId = config.voice_id || "";
       const advData = {
         speed: config.speed ?? 1.0,
@@ -1244,44 +884,4 @@ async function loadCharDataFromST() {
   }
 
   bindRowEvents();
-}
-
-async function saveCharDataToST() {
-  const context = SillyTavern.getContext();
-  const { writeExtensionField, characterId } = context;
-
-  if (characterId === undefined || characterId === null) {
-    if (window.toastr)
-      window.toastr.warning("未选中角色（或在群聊中），无法保存到角色卡！");
-    return;
-  }
-
-  const mapData = {};
-  $("#siren-mm-char-list .siren-mm-char-item").each(function () {
-    const charName = $(this).find(".mm-char-name").val().trim();
-    const voiceId = $(this).find(".mm-voice-id").val().trim();
-    if (charName && voiceId) {
-      // 组装最终写入角色卡的数据
-      const advDataStr = decodeURIComponent($(this).find(".mm-adv-data").val());
-      let advData = getDefaultMinimaxAdvData();
-      try {
-        advData = { ...advData, ...JSON.parse(advDataStr) };
-      } catch (e) {}
-
-      mapData[charName] = {
-        voice_id: voiceId,
-        ...advData,
-      };
-    }
-  });
-
-  try {
-    await writeExtensionField(characterId, "siren_voice_tts_minimax", {
-      voices: mapData,
-    });
-    if (window.toastr) window.toastr.success("MiniMax 角色音色配置已保存！");
-  } catch (err) {
-    console.error("[Siren] 写入角色卡失败:", err);
-    if (window.toastr) window.toastr.error("写入配置失败！");
-  }
 }
