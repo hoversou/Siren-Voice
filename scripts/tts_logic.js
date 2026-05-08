@@ -24,6 +24,7 @@ document.addEventListener("sirenVolumeChanged", (e) => {
 });
 /**
  * 助手函数：从角色卡提取 MiniMax 的专属设置并组合最终请求参数
+ * 修改：增加 custom_url 字段的读取与返回
  */
 function getMinimaxCharConfig(charName, ttsSettings) {
   const context = SillyTavern.getContext();
@@ -41,11 +42,13 @@ function getMinimaxCharConfig(charName, ttsSettings) {
   }
 
   // 将全局的 API Key、模型，和角色独有的音色参数合并
+  // 注意：这里也把 custom_url 传递进去
   return {
-    region: ttsSettings.region || "cn", // 👈 关键修复：把 region 透传给底层逻辑！
+    region: ttsSettings.region || "cn",
     api_key: ttsSettings.api_key,
     model: ttsSettings.model,
     text_norm: ttsSettings.text_norm,
+    custom_url: ttsSettings.custom_url || "",   // 👈 新增
     ...charConfig,
   };
 }
@@ -306,6 +309,7 @@ export async function fetchTtsBlobProvider(
           .replace(/\[([^\]]+)\]/g, "($1)")
           .replace(/【([^】]+)】/g, "($1)");
 
+        // 注意：custom_url 已经在 getMinimaxCharConfig 中一起返回了
         blob = await generateMinimaxAudioBlob(
           preloadMmText,
           speakObj.mood,
