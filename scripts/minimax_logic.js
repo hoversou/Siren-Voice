@@ -1,5 +1,10 @@
 // 获取不同版本的 Base URL
-function getBaseUrl(region) {
+// 修改：支持传入自定义地址 customUrl，优先使用
+function getBaseUrl(region, customUrl = "") {
+    if (customUrl && customUrl.trim() !== "") {
+        // 去掉末尾可能的多余斜杠
+        return customUrl.replace(/\/+$/, "");
+    }
     return region === "global"
         ? "https://api.minimax.io"
         : "https://api.minimaxi.com";
@@ -20,9 +25,10 @@ function hexToBlob(hexString, mimeType = "audio/mpeg") {
 /**
  * 请求 MiniMax 拉取当前账号所有可用音色
  * 返回格式: [{ id: "voice_123", name: "清冷少年" }, ...]
+ * 修改：增加 customUrl 参数
  */
-export async function fetchMinimaxVoices(apiKey, region = "cn") {
-    const url = `${getBaseUrl(region)}/v1/get_voice`;
+export async function fetchMinimaxVoices(apiKey, region = "cn", customUrl = "") {
+    const url = `${getBaseUrl(region, customUrl)}/v1/get_voice`;
 
     const response = await fetch(url, {
         method: "POST",
@@ -75,7 +81,8 @@ export async function fetchMinimaxVoices(apiKey, region = "cn") {
  * @param {object} config ST 全局/角色设置组合好的配置
  */
 export async function generateMinimaxAudioBlob(text, mood, config) {
-    const url = `${getBaseUrl(config.region || "cn")}/v1/t2a_v2`;
+    // 修改：使用 config.custom_url 传入自定义地址
+    const url = `${getBaseUrl(config.region || "cn", config.custom_url || "")}/v1/t2a_v2`;
 
     // 映射从 ST 传来的基础参数和高级效果器参数
     const requestBody = {
@@ -182,9 +189,10 @@ export async function generateMinimaxAudioBlob(text, mood, config) {
  * @param {string} apiKey
  * @param {File} file 文件对象
  * @param {string} purpose "voice_clone" 或 "prompt_audio"
+ * 修改：增加 customUrl 参数
  */
-export async function uploadMinimaxFile(apiKey, file, purpose, region = "cn") {
-    const url = `${getBaseUrl(region)}/v1/files/upload`;
+export async function uploadMinimaxFile(apiKey, file, purpose, region = "cn", customUrl = "") {
+    const url = `${getBaseUrl(region, customUrl)}/v1/files/upload`;
 
     // 使用 FormData 构建 multipart/form-data 请求
     const formData = new FormData();
@@ -218,9 +226,10 @@ export async function uploadMinimaxFile(apiKey, file, purpose, region = "cn") {
  * 请求 MiniMax 进行音色快速复刻
  * @param {string} apiKey
  * @param {object} cloneConfig 克隆参数组合
+ * 修改：cloneConfig 可能包含 custom_url，用于构建地址
  */
 export async function cloneMinimaxVoice(apiKey, cloneConfig) {
-    const url = `${getBaseUrl(cloneConfig.region || "cn")}/v1/voice_clone`;
+    const url = `${getBaseUrl(cloneConfig.region || "cn", cloneConfig.custom_url || "")}/v1/voice_clone`;
 
     const requestBody = {
         file_id: parseInt(cloneConfig.file_id),
