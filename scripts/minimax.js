@@ -34,6 +34,7 @@ export function getMinimaxHtml() {
                 <select id="siren-mm-region" class="siren-ext-select" style="flex: 1; min-width: 200px;">
                     <option value="cn">国内版 (api.minimaxi.com)</option>
                     <option value="global">国际版 (api.minimax.io)</option>
+                    <option value="custom">自定义地址</option>
                 </select>
             </div>
     
@@ -42,13 +43,11 @@ export function getMinimaxHtml() {
                 <input type="password" id="siren-mm-apikey" class="siren-ext-input" style="flex: 1; min-width: 200px;" placeholder="输入 MiniMax API Key">
             </div>
     
-            <!-- 👇 新增：自定义 Base URL 输入框 -->
-            <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;">
+            <div id="siren-mm-custom-url-container" style="display: none; flex: 1; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;">
                 <div class="siren-ext-setting-label" style="white-space: nowrap; font-size: 0.95em; color: #cbd5e1;">自定义地址</div>
-                <input type="text" id="siren-mm-custom-url" class="siren-ext-input" style="flex: 1; min-width: 200px;" placeholder="留空则使用官方地址，如 https://api.example.com">
+                <input type="text" id="siren-mm-custom-url" class="siren-ext-input" style="flex: 1; min-width: 200px;" placeholder="例如 https://api.6ai.chat">
             </div>
     
-            <!-- 👇 修改：模型选择由固定下拉框改为可编辑输入框 + datalist 预设选项 -->
             <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;">
                 <div class="siren-ext-setting-label" style="white-space: nowrap; font-size: 0.95em; color: #cbd5e1;">合成模型</div>
                 <input type="text" id="siren-mm-model" class="siren-ext-input" list="siren-mm-model-list" 
@@ -341,6 +340,7 @@ export function bindMinimaxEvents() {
       api_key: "",
       model: "speech-2.8-hd",
       text_norm: false,
+      region: "cn",
       custom_url: "",
     };
   }
@@ -348,10 +348,25 @@ export function bindMinimaxEvents() {
   const mmConfig = settings.tts.minimax;
   $("#siren-mm-region").val(mmConfig.region || "cn");
   $("#siren-mm-apikey").val(mmConfig.api_key || "");
-  // 注意：这里直接设置 input 的 value，即使是普通 input 也完全兼容
   $("#siren-mm-model").val(mmConfig.model || "speech-2.8-hd");
   $("#siren-mm-norm").prop("checked", mmConfig.text_norm || false);
   $("#siren-mm-custom-url").val(mmConfig.custom_url || "");
+
+  function toggleCustomUrlVisibility() {
+    if ($("#siren-mm-region").val() === "custom") {
+      $("#siren-mm-custom-url-container").show();
+    } else {
+      $("#siren-mm-custom-url-container").hide();
+    }
+  }
+
+  toggleCustomUrlVisibility();
+
+  $("#siren-mm-region").off("change").on("change", function () {
+    toggleCustomUrlVisibility();
+    const settings = getSirenSettings();
+    settings.tts.minimax.region = $(this).val();
+  });
 
   loadCharDataFromST();
 
@@ -398,7 +413,7 @@ export function bindMinimaxEvents() {
       const settings = getSirenSettings();
       settings.tts.minimax.region = $("#siren-mm-region").val();
       settings.tts.minimax.api_key = $("#siren-mm-apikey").val().trim();
-      settings.tts.minimax.model = $("#siren-mm-model").val().trim(); // input 直接取值
+      settings.tts.minimax.model = $("#siren-mm-model").val().trim();
       settings.tts.minimax.text_norm = $("#siren-mm-norm").is(":checked");
       settings.tts.minimax.custom_url = $("#siren-mm-custom-url").val().trim();
     },
@@ -469,7 +484,7 @@ export function bindMinimaxEvents() {
       const settings = getSirenSettings();
       settings.tts.minimax.region = $("#siren-mm-region").val();
       settings.tts.minimax.api_key = $("#siren-mm-apikey").val().trim();
-      settings.tts.minimax.model = $("#siren-mm-model").val().trim(); // input 取值
+      settings.tts.minimax.model = $("#siren-mm-model").val().trim();
       settings.tts.minimax.text_norm = $("#siren-mm-norm").is(":checked");
       settings.tts.minimax.custom_url = $("#siren-mm-custom-url").val().trim();
 
@@ -560,7 +575,7 @@ export function bindMinimaxEvents() {
 
       const mood = $("#siren-mm-test-mood").val();
       const apiKey = $("#siren-mm-apikey").val().trim();
-      const model = $("#siren-mm-model").val().trim(); // 直接取输入框的值
+      const model = $("#siren-mm-model").val().trim();
       const textNorm = $("#siren-mm-norm").is(":checked");
       const customUrl = $("#siren-mm-custom-url").val().trim();
 
@@ -760,7 +775,7 @@ export function bindMinimaxEvents() {
       text: demoText,
       prompt_audio: promptId || null,
       prompt_text: promptText || null,
-      model: $("#siren-mm-model").val().trim(), // 使用输入框的值
+      model: $("#siren-mm-model").val().trim(),
       need_noise_reduction: $("#siren-mm-clone-nr").is(":checked"),
       custom_url: customUrl,
     };
